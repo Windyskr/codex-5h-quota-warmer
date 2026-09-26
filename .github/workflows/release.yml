@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  PLUGIN_ID: codex-5h-quota-warmer
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+      - name: Check Go code
+        working-directory: go
+        run: go vet ./...
+
+  build:
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, ext: so, runner: ubuntu-24.04 }
+          - { goos: linux, goarch: arm64, ext: so, runner: ubuntu-24.04-arm }
+          - { goos: darwin, goarch: amd64, ext: dylib, runner: macos-15-intel }
+          - { goos: darwin, goarch: arm64, ext: dylib, runner: macos-15 }
+          - { goos: windows, goarch: amd64, ext: dll, runner: windows-2025 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+      - name: Set up MinGW
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: mingw-w64-x86_64-gcc
+      - name: Build and package
+        working-directory: go
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          platform="${{ matrix.goos }}_${{ matrix.goarch }}"
+          library="../dist/${platform}/${PLUGIN_ID}.${{ matrix.ext }}"
+          archive="../dist/${PLUGIN_ID}_${version}_${platform}.zip"
+          mkdir -p "../dist/${platform}"
+          CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -buildmode=c-shared -ldflags='-s -w' -o "$library" .
+          go run ../scripts/package.go -input "$library" -output "$archive"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PLUGIN_ID }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sort -k2 dist/*.zip.sha256 > dist/checksums.txt
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

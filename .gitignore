@@ -1,0 +1,6 @@
+*.so
+*.h
+*.dylib
+*.dll
+plugins/state/
+dist/
